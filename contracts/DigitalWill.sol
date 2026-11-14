@@ -11,16 +11,18 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 /// @author heir.finance
 /// @notice Keeps a testator's native coins and ERC-20 tokens for their heirs. Until the will is
 ///         released, the testator can deposit, change heirs, withdraw any amount or cancel the will.
-///         The will becomes releasable as soon as either condition is met:
-///         1) the chosen lock period (1 month / 1 year / 5 years) has ended, even if the testator
-///            keeps checking in;
-///         2) CHECK_IN_INTERVAL (30 days) has passed since the testator's last activity.
-///         Anyone can then call release(), which is final: it credits the heirs by share, or the
-///         testator if no heirs were set. Each recipient then collects their own credit.
+///         The will has one trigger: it becomes releasable once the testator has been inactive for
+///         the inactivity period they chose (3 months / 6 months / 1 year). Every testator action
+///         (check-in, deposit, withdrawal, changing heirs or the period) resets that timer, so a
+///         testator who stays active keeps the will forever.
+///         Once releasable, anyone can call release(), which is final: it credits the heirs by share,
+///         or the testator if no heirs were set. Each recipient then collects their own credit.
+///         Until someone calls release(), the testator can still check in or cancel.
 /// @dev    Architecture:
 ///         - Not upgradeable: fixing a bug requires deploying a new contract.
-///         - The owner can only pause new deposits. The owner cannot move user funds and cannot block
-///           withdrawals, cancellation, release or claims.
+///         - The owner can only pause new deposits and transfer or renounce ownership (inherited from
+///           Ownable). The owner cannot move user funds and cannot block withdrawals, check-ins,
+///           cancellation, release or claims. Renouncing while paused leaves deposits paused forever.
 ///         - Pull payments: release() makes no external calls and only updates credits, so a broken
 ///           recipient or token cannot block a payout to anyone else.
 ///         - A 1% fee (FEE_BPS) is charged on deposits only. Native coin fees accrue in pendingFees;
@@ -30,11 +32,12 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 contract DigitalWill is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    /// @notice Lock periods a testator can choose when creating a will.
-    enum LockPeriod {
-        OneMonth,
-        OneYear,
-        FiveYears
+    /// @notice Inactivity periods a testator can choose. The will becomes releasable after this much
+    ///         time without testator activity.
+    enum InactivityPeriod {
+        ThreeMonths, // 90 days
+        SixMonths,   // 180 days
+        OneYear      // 365 days
     }
 
     /// @notice An heir and their share of the will.
@@ -52,16 +55,14 @@ contract DigitalWill is Ownable, ReentrancyGuard {
     /// @notice State of one testator's will. Token balances are kept in tokenBalances.
     struct Will {
         address testator;
-        uint256 balance;         // ETH balance
+        uint256 balance;           // ETH balance, net of fee
         uint256 createdAt;
-        uint256 unlockTime;
-        uint256 lastCheckIn;
+        uint256 inactivityPeriod;  // seconds of inactivity after which the will is releasable
+        uint256 lastCheckIn;       // timestamp of the last testator activity
         Heir[] heirs;
-        address[] depositedTokens; // list of ERC-20 tokens deposited into this will
+        address[] depositedTokens; // ERC-20 tokens ever deposited into this will, see MAX_TOKENS
     }
 
-    /// @notice Time without testator activity after which a will becomes releasable.
-    uint256 public constant CHECK_IN_INTERVAL = 30 days;
     /// @notice Basis points that make up 100%; heir shares must add up to this value.
     uint256 public constant TOTAL_BPS = 10000;
     /// @notice Maximum number of heirs per will.
@@ -137,8 +138,8 @@ contract DigitalWill is Ownable, ReentrancyGuard {
     /// @notice Emitted when a will is created.
     /// @param testator Creator of the will.
     /// @param amount Native coins deposited, net of fee.
-    /// @param unlockTime Timestamp when the lock period ends.
-    event WillCreated(address indexed testator, uint256 amount, uint256 unlockTime);
+    /// @param inactivityPeriod Seconds of inactivity after which the will becomes releasable.
+    event WillCreated(address indexed testator, uint256 amount, uint256 inactivityPeriod);
     /// @notice Emitted when native coins are added to a will.
     /// @param testator Owner of the will.
     /// @param amount Amount added, net of fee.
@@ -151,6 +152,10 @@ contract DigitalWill is Ownable, ReentrancyGuard {
     /// @notice Emitted when a testator replaces the list of heirs.
     /// @param testator Owner of the will.
     event HeirsUpdated(address indexed testator);
+    /// @notice Emitted when a testator changes the inactivity period.
+    /// @param testator Owner of the will.
+    /// @param inactivityPeriod New period in seconds.
+    event InactivityPeriodChanged(address indexed testator, uint256 inactivityPeriod);
     /// @notice Emitted when native coins are withdrawn from a will.
     /// @param testator Owner of the will.
     /// @param amount Amount withdrawn.
@@ -261,10 +266,10 @@ contract DigitalWill is Ownable, ReentrancyGuard {
     /// @dev    REBASING and UNTRUSTED tokens: see depositToken().
     /// @param heirs_ Heirs and their shares. May be empty: the will is then credited to the testator on
     ///        release. Otherwise shares must add up to TOTAL_BPS.
-    /// @param period Lock period. When it ends the will becomes releasable, even if the testator keeps
-    ///        checking in.
+    /// @param period Inactivity period: the will becomes releasable after this long without testator
+    ///        activity.
     /// @param tokens_ Tokens and amounts to deposit, at most MAX_TOKENS.
-    function createWill(Heir[] calldata heirs_, LockPeriod period, TokenDeposit[] calldata tokens_) external payable nonReentrant whenNotPaused {
+    function createWill(Heir[] calldata heirs_, InactivityPeriod period, TokenDeposit[] calldata tokens_) external payable nonReentrant whenNotPaused {
         require(msg.value > 0 || tokens_.length > 0, "no funds sent");
         require(wills[msg.sender].testator == address(0), "will already exists");
         require(tokens_.length <= MAX_TOKENS, "too many tokens");
@@ -276,13 +281,13 @@ contract DigitalWill is Ownable, ReentrancyGuard {
         w.testator = msg.sender;
         w.balance = depositAmount;
         w.createdAt = block.timestamp;
-        w.unlockTime = block.timestamp + _durationOf(period);
+        w.inactivityPeriod = _durationOf(period);
         w.lastCheckIn = block.timestamp;
         for (uint256 i = 0; i < heirs_.length; i++) {
             w.heirs.push(heirs_[i]);
         }
 
-        emit WillCreated(msg.sender, depositAmount, w.unlockTime);
+        emit WillCreated(msg.sender, depositAmount, w.inactivityPeriod);
         if (fee > 0) _accrueFee(fee);
 
         // Deposit each token
@@ -317,11 +322,9 @@ contract DigitalWill is Ownable, ReentrancyGuard {
     }
 
     /// @notice Adds the sent native coins to the caller's will, minus the FEE_BPS fee.
-    ///         Resets the inactivity timer. Reverts once the lock period has ended, see
-    ///         _requireLockNotExpired().
+    ///         Resets the inactivity timer.
     function deposit() external payable nonReentrant onlyTestator whenNotPaused {
         require(msg.value > 0, "no funds sent");
-        _requireLockNotExpired(msg.sender);
         (uint256 fee, uint256 depositAmount) = _splitFee(msg.value);
 
         Will storage w = wills[msg.sender];
@@ -331,16 +334,15 @@ contract DigitalWill is Ownable, ReentrancyGuard {
         _accrueFee(fee);
     }
 
-    /// @notice Proof of life: resets the inactivity timer. Does not change the end of the lock period.
-    /// @dev    WARNING: check-ins only affect the inactivity trigger. Once block.timestamp >= unlockTime
-    ///         the will stays releasable regardless of check-ins. Check-ins still work after that but
-    ///         cannot reverse it. Use isLockExpired() / isInactivityExpired() to show the difference.
+    /// @notice Proof of life: resets the inactivity timer. Works even after the will has become
+    ///         releasable, as long as nobody has called release() yet: the will is then no longer
+    ///         releasable.
     function checkIn() external onlyTestator {
         wills[msg.sender].lastCheckIn = block.timestamp;
         emit CheckedIn(msg.sender, block.timestamp);
     }
 
-    /// @notice Replaces the caller's list of heirs. Does not reset the inactivity timer.
+    /// @notice Replaces the caller's list of heirs. Resets the inactivity timer.
     /// @param heirs_ New heirs and shares. May be empty: the will is then credited to the testator on
     ///        release. Otherwise shares must add up to TOTAL_BPS.
     function setHeirs(Heir[] calldata heirs_) external onlyTestator {
@@ -350,7 +352,18 @@ contract DigitalWill is Ownable, ReentrancyGuard {
         for (uint256 i = 0; i < heirs_.length; i++) {
             w.heirs.push(heirs_[i]);
         }
+        w.lastCheckIn = block.timestamp;
         emit HeirsUpdated(msg.sender);
+    }
+
+    /// @notice Changes the caller's inactivity period. Resets the inactivity timer, so the new period
+    ///         is counted from now.
+    /// @param period New inactivity period.
+    function setInactivityPeriod(InactivityPeriod period) external onlyTestator {
+        Will storage w = wills[msg.sender];
+        w.inactivityPeriod = _durationOf(period);
+        w.lastCheckIn = block.timestamp;
+        emit InactivityPeriodChanged(msg.sender, w.inactivityPeriod);
     }
 
     /// @notice Withdraws native coins from the caller's will, up to its full balance, without a fee.
@@ -394,9 +407,9 @@ contract DigitalWill is Ownable, ReentrancyGuard {
         delete wills[msg.sender];
 
         // Push ETH directly back to testator — state is fully deleted before any
-        // external call so reentrancy has no effect.  If push fails (e.g. the
-        // testator is a contract whose receive() tries to reenter), fall back to
-        // the pull model so the testator can still claim via claim().
+        // external call so reentrancy has no effect. If the push fails (e.g. the
+        // testator is a contract that rejects native coins or tries to reenter),
+        // fall back to the pull model: the testator collects via claim() or claimTo().
         if (ethAmount > 0) {
             (bool ok, ) = msg.sender.call{value: ethAmount}("");
             if (!ok) {
@@ -419,40 +432,15 @@ contract DigitalWill is Ownable, ReentrancyGuard {
         emit WillCancelled(msg.sender, ethAmount);
     }
 
-    /// @notice Whether the will can be released now.
-    /// @dev    Two independent triggers, either is sufficient:
-    ///         1. Time lock: the chosen lock period has ended. Once true it stays true, check-ins do NOT
-    ///            prevent release.
-    ///         2. Inactivity: at least CHECK_IN_INTERVAL has passed since the last activity. Activity
-    ///            (check-in, deposit or withdrawal) resets this trigger, but not the time lock.
-    ///
-    ///         IMPORTANT FOR UI: when isLockExpired() is true, show a prominent warning that anyone can
-    ///         now release the will and check-ins will not prevent it, and allow the testator to cancel.
+    /// @notice Whether the will can be released now: it exists and the testator has been inactive for
+    ///         at least its inactivity period. Any testator action makes it non-releasable again until
+    ///         the period passes once more.
     /// @param testator Owner of the will.
-    /// @return True if the will exists and at least one trigger has fired.
+    /// @return True if the will exists and its inactivity period has passed.
     function isReleasable(address testator) public view returns (bool) {
         Will storage w = wills[testator];
         if (w.testator == address(0)) return false;
-        return block.timestamp >= w.unlockTime || block.timestamp >= w.lastCheckIn + CHECK_IN_INTERVAL;
-    }
-
-    /// @notice Whether the lock period has ended. Once true, the will stays releasable regardless of
-    ///         check-ins. The UI must show a warning.
-    /// @param testator Owner of the will.
-    /// @return True if the will exists and its lock period has ended.
-    function isLockExpired(address testator) public view returns (bool) {
-        Will storage w = wills[testator];
-        if (w.testator == address(0)) return false;
-        return block.timestamp >= w.unlockTime;
-    }
-
-    /// @notice Whether the inactivity period has passed. Testator activity resets this.
-    /// @param testator Owner of the will.
-    /// @return True if the will exists and CHECK_IN_INTERVAL has passed since the last activity.
-    function isInactivityExpired(address testator) public view returns (bool) {
-        Will storage w = wills[testator];
-        if (w.testator == address(0)) return false;
-        return block.timestamp >= w.lastCheckIn + CHECK_IN_INTERVAL;
+        return block.timestamp >= w.lastCheckIn + w.inactivityPeriod;
     }
 
     /// @notice Releases a releasable will. Callable by anyone and irreversible: the will is deleted and
@@ -522,7 +510,6 @@ contract DigitalWill is Ownable, ReentrancyGuard {
     ///         first. Resets the inactivity timer.
     ///         Fee-on-transfer tokens are rejected. A will can receive at most MAX_TOKENS different
     ///         tokens during its lifetime: a slot stays used even after the token is fully withdrawn.
-    ///         Reverts once the lock period has ended, see _requireLockNotExpired().
     /// @dev    REBASING TOKENS NOT SUPPORTED: tokens whose balances change automatically (stETH, aUSDC,
     ///         etc.) can leave the contract holding less than it owes. Wills share one balance per token,
     ///         so a shortfall affects every recipient of that token: late collectors may be unable to
@@ -539,7 +526,6 @@ contract DigitalWill is Ownable, ReentrancyGuard {
         require(amount > 0, "zero amount");
         Will storage w = wills[msg.sender];
         require(w.testator == msg.sender, "no active will");
-        _requireLockNotExpired(msg.sender);
 
         // If this token hasn't been registered for this will yet, claim a slot.
         if (!_tokenRegistered[msg.sender][token]) {
@@ -602,14 +588,14 @@ contract DigitalWill is Ownable, ReentrancyGuard {
     // ---- View functions ----
 
     /// @notice Returns a will's native coin balance, timing and heirs. All values are zero or empty if
-    ///         the will does not exist, except checkInDeadline, which is then CHECK_IN_INTERVAL.
-    /// @dev    Use isLockExpired() and isInactivityExpired() to see which trigger applies.
+    ///         the will does not exist.
     /// @param testator Owner of the will.
     /// @return balance Native coin balance.
     /// @return createdAt Creation timestamp.
-    /// @return unlockTime Timestamp when the lock period ends.
+    /// @return inactivityPeriod Seconds of inactivity after which the will becomes releasable.
     /// @return lastCheckIn Timestamp of the last testator activity.
-    /// @return checkInDeadline Timestamp when the inactivity trigger fires.
+    /// @return releasableAt Timestamp from which the will can be released, unless the testator acts
+    ///         before then.
     /// @return releasable Whether the will can be released now.
     /// @return heirs_ Heirs and their shares.
     function getWill(address testator)
@@ -618,9 +604,9 @@ contract DigitalWill is Ownable, ReentrancyGuard {
         returns (
             uint256 balance,
             uint256 createdAt,
-            uint256 unlockTime,
+            uint256 inactivityPeriod,
             uint256 lastCheckIn,
-            uint256 checkInDeadline,
+            uint256 releasableAt,
             bool releasable,
             Heir[] memory heirs_
         )
@@ -629,9 +615,9 @@ contract DigitalWill is Ownable, ReentrancyGuard {
         return (
             w.balance,
             w.createdAt,
-            w.unlockTime,
+            w.inactivityPeriod,
             w.lastCheckIn,
-            w.lastCheckIn + CHECK_IN_INTERVAL,
+            w.lastCheckIn + w.inactivityPeriod,
             isReleasable(testator),
             w.heirs
         );
@@ -690,14 +676,6 @@ contract DigitalWill is Ownable, ReentrancyGuard {
 
         IERC20(token).safeTransfer(recipient, amount);
         emit TokenClaimed(recipient, token, amount);
-    }
-
-    /// @dev Rejects deposits into a will whose lock period has ended. Such a will can be released by
-    ///      anyone at any moment and check-ins no longer help, so a new deposit would go straight to
-    ///      the heirs. Withdrawals and cancellation stay allowed.
-    /// @param testator Owner of the will.
-    function _requireLockNotExpired(address testator) internal view {
-        require(block.timestamp < wills[testator].unlockTime, "lock expired");
     }
 
     /// @dev Rejects the zero address and this contract, from which funds could not be recovered.
@@ -767,13 +745,13 @@ contract DigitalWill is Ownable, ReentrancyGuard {
         pendingFees += fee;
     }
 
-    /// @dev Converts a lock period to seconds.
-    /// @param period Lock period.
+    /// @dev Converts an inactivity period to seconds.
+    /// @param period Inactivity period.
     /// @return Duration in seconds.
-    function _durationOf(LockPeriod period) internal pure returns (uint256) {
-        if (period == LockPeriod.OneMonth) return 30 days;
-        if (period == LockPeriod.OneYear) return 365 days;
-        return 5 * 365 days; // FiveYears
+    function _durationOf(InactivityPeriod period) internal pure returns (uint256) {
+        if (period == InactivityPeriod.ThreeMonths) return 90 days;
+        if (period == InactivityPeriod.SixMonths) return 180 days;
+        return 365 days; // OneYear
     }
 
     /// @dev Reverts unless the list is empty, or has at most MAX_HEIRS unique valid addresses, none of
