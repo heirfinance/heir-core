@@ -17,10 +17,13 @@ Protocol fee treasury. Receives deposit fees in native coins and ERC-20 tokens; 
 | Network      | Chain ID | DigitalWill | FeeCollector |
 |--------------|----------|-------------|--------------|
 | Ethereum     | 1        | [`0xfE4C9c1B63038aC51CD74A8D6a94EcABe269cD16`](https://etherscan.io/address/0xfE4C9c1B63038aC51CD74A8D6a94EcABe269cD16#code) | [`0xCE9f0f0da9Ee06dbcE253D0a0564Ed74B19606c4`](https://etherscan.io/address/0xCE9f0f0da9Ee06dbcE253D0a0564Ed74B19606c4#code) |
+| BNB Chain    | 56       | [`0xfE4C9c1B63038aC51CD74A8D6a94EcABe269cD16`](https://bscscan.com/address/0xfE4C9c1B63038aC51CD74A8D6a94EcABe269cD16#code) | [`0xCE9f0f0da9Ee06dbcE253D0a0564Ed74B19606c4`](https://bscscan.com/address/0xCE9f0f0da9Ee06dbcE253D0a0564Ed74B19606c4#code) |
+| Polygon      | 137      | [`0xfE4C9c1B63038aC51CD74A8D6a94EcABe269cD16`](https://polygonscan.com/address/0xfE4C9c1B63038aC51CD74A8D6a94EcABe269cD16#code) | [`0xCE9f0f0da9Ee06dbcE253D0a0564Ed74B19606c4`](https://polygonscan.com/address/0xCE9f0f0da9Ee06dbcE253D0a0564Ed74B19606c4#code) |
+| Arbitrum One | 42161    | [`0xfE4C9c1B63038aC51CD74A8D6a94EcABe269cD16`](https://arbiscan.io/address/0xfE4C9c1B63038aC51CD74A8D6a94EcABe269cD16#code) | [`0xCE9f0f0da9Ee06dbcE253D0a0564Ed74B19606c4`](https://arbiscan.io/address/0xCE9f0f0da9Ee06dbcE253D0a0564Ed74B19606c4#code) |
 | Sepolia      | 11155111 | [`0xb780ac2e567f5550904F7dED2715aeaaE0312aD5`](https://sepolia.etherscan.io/address/0xb780ac2e567f5550904F7dED2715aeaaE0312aD5#code) | [`0xfE4C9c1B63038aC51CD74A8D6a94EcABe269cD16`](https://sepolia.etherscan.io/address/0xfE4C9c1B63038aC51CD74A8D6a94EcABe269cD16#code) |
 | Polygon Amoy | 80002    | [`0xfE4C9c1B63038aC51CD74A8D6a94EcABe269cD16`](https://amoy.polygonscan.com/address/0xfE4C9c1B63038aC51CD74A8D6a94EcABe269cD16#code) | [`0xCE9f0f0da9Ee06dbcE253D0a0564Ed74B19606c4`](https://amoy.polygonscan.com/address/0xCE9f0f0da9Ee06dbcE253D0a0564Ed74B19606c4#code) |
 
-All contracts are verified. Owner of every contract: Safe [`0x3Edd26179771A3Af92e82f2B52908f6dFB4AC1dA`](https://app.safe.global/home?safe=eth:0x3Edd26179771A3Af92e82f2B52908f6dFB4AC1dA) (same address on all three networks).
+All contracts are verified. Owner of every contract: Safe [`0x3Edd26179771A3Af92e82f2B52908f6dFB4AC1dA`](https://app.safe.global/home?safe=eth:0x3Edd26179771A3Af92e82f2B52908f6dFB4AC1dA) (same address on every network).
 
 Compiled with Solidity 0.8.24, optimizer enabled (200 runs), OpenZeppelin Contracts 5.6.1.
 
